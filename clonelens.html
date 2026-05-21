@@ -1,0 +1,897 @@
+<!doctype html>
+<html lang="ja">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>CloneLens: A Browser-Based Local Code Clone Detection Tool</title>
+  <style>
+    /*
+      この CSS は単一 HTML ファイルで完結するための最小スタイルである。
+      外部 CSS やフォントは読み込まないので、オフラインでも表示できる。
+    */
+    :root { font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; color: #1f2937; background: #f8fafc; }
+    body { margin: 0; padding: 24px; }
+    h1 { margin: 0 0 8px; font-size: 24px; }
+    h2 { margin-top: 24px; font-size: 18px; }
+    .note { margin: 8px 0 20px; color: #475569; line-height: 1.6; }
+    .panel { background: white; border: 1px solid #e5e7eb; border-radius: 12px; padding: 16px; margin-bottom: 16px; box-shadow: 0 1px 3px rgba(15, 23, 42, 0.06); }
+    .controls { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 12px; align-items: end; }
+    label { display: block; font-size: 13px; color: #334155; margin-bottom: 4px; }
+    input[type="number"], select { width: 100%; box-sizing: border-box; padding: 8px; border: 1px solid #cbd5e1; border-radius: 8px; background: white; }
+    button { padding: 10px 14px; border: none; border-radius: 8px; background: #2563eb; color: white; font-weight: 600; cursor: pointer; }
+    button:disabled { background: #94a3b8; cursor: not-allowed; }
+    .status { white-space: pre-wrap; color: #475569; font-size: 14px; }
+    table { width: 100%; border-collapse: collapse; font-size: 14px; background: white; }
+    th, td { border-bottom: 1px solid #e5e7eb; padding: 8px; text-align: left; vertical-align: top; }
+    th { background: #f1f5f9; color: #334155; }
+    .match { border: 1px solid #e5e7eb; border-radius: 10px; margin: 12px 0; overflow: hidden; background: white; }
+    .match-header { padding: 10px 12px; background: #f1f5f9; font-weight: 600; }
+    .diff { display: grid; grid-template-columns: 1fr 1fr; gap: 1px; background: #e5e7eb; }
+    pre { margin: 0; padding: 8px 12px; overflow: auto; background: #ffffff; line-height: 1.25; font-size: 13px; max-height: 280px; }
+    .small { color: #64748b; font-size: 12px; }
+    .warning { color: #b45309; }
+    .code-line { display: block; white-space: pre; border-radius: 3px; padding: 1px 4px; min-height: 1.25em; box-sizing: border-box; }
+    /* クローン候補範囲の行背景。空行でも背景が見えるように .code-line 側で高さを確保している。 */
+    .line-clone { background: #fef9c3; }
+    .line-diff { background: #ffedd5; outline: 1px solid #fdba74; }
+    .line-number { color: #64748b; user-select: none; }
+    /* クローン範囲内で相手側との差分がある字句を示す。行全体ではなく字句単位で強調する。 */
+    .token-diff {
+      background: #ffedd5;
+      outline: 1px solid #fdba74;
+      border-radius: 3px;
+      padding: 0 2px;
+    }
+    /* 標準の input[type=file] はブラウザ固有の文言が出るため、画面上では隠して独自ボタンを表示する。 */
+    .hidden-file-input {
+      position: absolute;
+      width: 1px;
+      height: 1px;
+      opacity: 0;
+      pointer-events: none;
+    }
+    .secondary-button {
+      display: inline-block;
+      padding: 10px 14px;
+      border: none;
+      border-radius: 8px;
+      background: #475569;
+      color: white;
+      font-weight: 600;
+      cursor: pointer;
+      text-align: center;
+    }
+    .selection-summary {
+      margin-top: 8px;
+      color: #64748b;
+      font-size: 12px;
+    }
+  </style>
+</head>
+<body>
+  <h1>CloneLens</h1>
+  <p class="note">
+    <strong>CloneLens: A Browser-Based Local Code Clone Detection Tool</strong><br>
+    Java と Python を対象にした、完全ローカル実行のコードクローン検出ツールです。
+    選択したファイルはサーバへ送信されません。解析処理は Web Worker で実行します。
+  </p>
+  <!--
+    入力選択セクション。
+    通常のソースファイル、zip ファイル、フォルダのいずれか、または複数を選択できる。
+    フォルダ選択では browser API の webkitdirectory を用いて、配下のファイルを再帰的に取得する。
+  -->
+  <section class="panel">
+    <h2>1. 入力選択</h2>
+    <div class="controls">
+      <div>
+        <label>ソースファイルまたは zip ファイル</label>
+        <input id="fileInput" class="hidden-file-input" type="file" multiple accept=".java,.py,.txt,.zip" />
+        <label for="fileInput" class="secondary-button">ファイルを選択</label>
+        <div id="fileSummary" class="selection-summary">ファイルは未選択です。</div>
+      </div>
+      <div>
+        <label>フォルダ</label>
+        <input id="folderInput" class="hidden-file-input" type="file" webkitdirectory directory multiple />
+        <label for="folderInput" class="secondary-button">フォルダを選択</label>
+        <div id="folderSummary" class="selection-summary">フォルダは未選択です。</div>
+        <p class="small warning">ダイアログ内に「アップロード」と表示される場合がありますが、実際にはサーバ送信は行いません。</p>
+      </div>
+    </div>
+    <h3 style="font-size: 15px; margin-bottom: 8px;">対象言語</h3>
+    <div id="languageFilters" class="controls">
+      <label><input type="checkbox" class="lang-filter" value=".java" data-lang="java" checked /> Java (.java)</label>
+      <label><input type="checkbox" class="lang-filter" value=".py" data-lang="python" checked /> Python (.py)</label>
+    </div>
+    <p class="small">通常ファイル、zip、フォルダを同時に指定できます。フォルダを指定した場合は、その配下の対象言語ファイルを再帰的に収集します。zip の対応圧縮方式は store と deflate です。</p>
+  </section>
+  <!--
+    検出設定セクション。
+    k-gram サイズ、winnowing の window サイズ、最小一致長、識別子正規化の有無を指定する。
+    これらの値は Worker に渡され、検出アルゴリズムのパラメータとして利用される。
+  -->
+  <section class="panel">
+    <h2>2. 検出設定</h2>
+    <div class="controls">
+      <div><label for="kSize">k-gram サイズ</label><input id="kSize" type="number" min="3" max="20" value="7" /></div>
+      <div><label for="windowSize">winnowing window サイズ</label><input id="windowSize" type="number" min="2" max="20" value="5" /></div>
+      <div><label for="minTokens">最小一致トークン数</label><input id="minTokens" type="number" min="10" max="500" value="40" /></div>
+      <div><label for="normalizeIds">識別子の正規化</label><select id="normalizeIds"><option value="on" selected>ON</option><option value="off">OFF</option></select></div>
+      <button id="runButton">検出する</button>
+    </div>
+  </section>
+  <!-- 実行中の進捗やエラーを表示する領域。Worker から送られる status メッセージもここに表示する。 -->
+  <section class="panel"><h2>3. 状態</h2><div id="status" class="status">ファイルを選択してください。</div></section>
+  <!-- 検出完了後、全体のファイル数、クローンペア数、重複率などの集計結果を表示する領域。 -->
+  <section class="panel"><h2>4. 統計情報</h2><div id="summaryStats"></div></section>
+  <!-- ファイルごとのトークン数、fingerprint 数、重複率、最も類似した相手などを表示する領域。 -->
+  <section class="panel"><h2>5. ファイル一覧・ファイル別統計</h2><div id="fileList"></div></section>
+  <!-- クローン候補の詳細を side-by-side で表示する領域。黄色はクローン範囲、オレンジは差分字句を表す。 -->
+  <section class="panel"><h2>6. 検出結果</h2><div id="results"></div></section>
+
+
+  <section class="panel">
+    <h2>7. CloneLens の検出アルゴリズムの大まかな説明</h2>
+    <p class="note">
+      このツールは、プログラムの意味を完全に理解しているわけではありません。
+      かわりに、ソースコードを細かい部品に分けて、「似た並びがどこにあるか」を探します。
+      文章の中から似たフレーズを探す方法に近い考え方です。
+    </p>
+
+    <h3 style="font-size: 15px;">1. ソースコードを読み込む</h3>
+    <p>
+      まず、ユーザが選んだ Java や Python のファイルをブラウザの中だけで読み込みます。
+      zip ファイルやフォルダを指定した場合も、中にある対象言語のファイルを集めます。
+      ソースコードはサーバには送られません。
+    </p>
+
+    <h3 style="font-size: 15px;">2. コメントや空白を取り除く</h3>
+    <p>
+      コメント、空白、改行の違いだけで別のプログラムだと判断しないように、比較にあまり重要でない部分を取り除いたり、そろえたりします。
+      たとえば、インデントの違いやコメントの有無は、できるだけ影響しないようにします。
+    </p>
+
+    <h3 style="font-size: 15px;">3. 変数名などを一般化する</h3>
+    <p>
+      設定で「識別子の正規化」を ON にしている場合、変数名や関数名の多くを <code>ID</code> のような共通の記号に置き換えます。
+      たとえば、<code>sum</code> と <code>total</code> という名前が違っていても、処理の形が似ていれば見つけやすくなります。
+    </p>
+
+    <h3 style="font-size: 15px;">4. コードをトークン列に分ける</h3>
+    <p>
+      ソースコードを、単語や記号のような小さな部品に分けます。
+      これをトークンと呼びます。
+    </p>
+    <pre>for (int i = 0; i &lt; n; i++) {
+    sum += a[i];
+}</pre>
+    <p>たとえば上のようなコードは、おおまかには次のようなトークン列として扱われます。</p>
+    <pre>for ( ID = NUM ; ID &lt; ID ; ID ++ ) { ID += ID [ ID ] ; }</pre>
+
+    <h3 style="font-size: 15px;">5. 短いトークンの並びを作る</h3>
+    <p>
+      トークン列から、連続する一定個数のトークンのまとまりを作ります。
+      たとえば k-gram サイズが 7 なら、7 個ずつの並びを少しずつずらしながら作ります。
+      これは、長い文章から短いフレーズをたくさん切り出すようなものです。
+    </p>
+
+    <h3 style="font-size: 15px;">6. fingerprint を作る</h3>
+    <p>
+      それぞれの短いトークン列を、短い数値に変換します。
+      これをハッシュ値と呼びます。
+      さらに、その中から代表的なものだけを選びます。
+      この代表値が、このツールでいう fingerprint です。
+    </p>
+    <p>
+      fingerprint は「このあたりのコードには、こういう特徴がある」という目印です。
+      すべての文字を直接比べるよりも、目印を使った方が速く探せます。
+    </p>
+
+    <h3 style="font-size: 15px;">7. 同じ fingerprint を持つ場所を探す</h3>
+    <p>
+      もし別々のファイルに同じ fingerprint が出てきたら、その近くには似たコードがある可能性があります。
+      このツールは、同じ fingerprint がどのファイルのどの位置に出てきたかを記録し、似ていそうなファイルの組を探します。
+    </p>
+
+    <h3 style="font-size: 15px;">8. 近い一致をまとめてクローン候補にする</h3>
+    <p>
+      1つだけ同じ fingerprint があっても、たまたま一致しただけかもしれません。
+      そこで、近い場所に複数の一致が集まっている場合に、それらをまとめて「クローン候補」として扱います。
+      一定以上の長さがあるものだけを結果に表示します。
+    </p>
+
+    <h3 style="font-size: 15px;">9. 結果を見やすく表示する</h3>
+    <p>
+      見つかったクローン候補について、ファイル名、行番号、類似度、一致トークン数などを表示します。
+      クローン範囲は黄色で、対応するクローンとの差分がある字句だけをオレンジ色で表示します。挿入・削除のように対応する行がない場合も、その行の字句をオレンジ色で表示します。
+      差分表示では、短い範囲については行単位の LCS という方法で、左右の行の対応関係を推定しています。
+    </p>
+
+    <h3 style="font-size: 15px;">この方法で見つけやすいもの・苦手なもの</h3>
+    <table>
+      <thead>
+        <tr><th>種類</th><th>説明</th><th>このツールでの見つけやすさ</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>ほぼ同じコード</td><td>空白やコメントだけが違うコード</td><td>見つけやすい</td></tr>
+        <tr><td>名前だけ変えたコード</td><td>変数名や関数名を変えたコード</td><td>比較的見つけやすい</td></tr>
+        <tr><td>少し変更したコード</td><td>一部の行を追加・削除・変更したコード</td><td>ある程度見つけられる</td></tr>
+        <tr><td>考え方だけ同じコード</td><td>同じ処理をまったく別の書き方で実装したコード</td><td>見つけにくい</td></tr>
+      </tbody>
+    </table>
+
+    <p class="small">
+      つまり、このツールは「完全に同じ意味のプログラムを判定する道具」ではなく、
+      「似た形のコード片を素早く見つけるための道具」です。
+      検出結果は最終判断ではなく、人が確認するための候補として扱うのが適切です。
+    </p>
+  </section>
+
+<script>
+/*
+  ここからが CloneLens のクローン検出ツール本体である。
+  1つの HTML ファイルだけで動作するように、Worker のコードも文字列としてこのファイル内に埋め込んでいる。
+  ユーザが選択したファイル内容は File API でブラウザ内に読み込むだけで、外部サーバには送信しない。
+*/
+(() => {
+  const fileInput = document.getElementById('fileInput');
+  const fileSummary = document.getElementById('fileSummary');
+  const folderInput = document.getElementById('folderInput');
+  const folderSummary = document.getElementById('folderSummary');
+  const runButton = document.getElementById('runButton');
+  const statusEl = document.getElementById('status');
+  const fileListEl = document.getElementById('fileList');
+  const summaryStatsEl = document.getElementById('summaryStats');
+  const resultsEl = document.getElementById('results');
+
+  /*
+    Web Worker 側で実行する JavaScript コード。
+    重い処理、具体的には zip 展開、トークン化、fingerprint 作成、クローン候補抽出、統計計算を
+    メインスレッドから分離して実行することで、画面操作の固まりを抑える。
+  */
+  const workerSource = String.raw`
+    const JAVA_KEYWORDS = new Set(['abstract','assert','boolean','break','byte','case','catch','char','class','const','continue','default','do','double','else','enum','extends','final','finally','float','for','goto','if','implements','import','instanceof','int','interface','long','native','new','package','private','protected','public','return','short','static','strictfp','super','switch','synchronized','this','throw','throws','transient','try','void','volatile','while','true','false','null']);
+    const PY_KEYWORDS = new Set(['False','None','True','and','as','assert','async','await','break','class','continue','def','del','elif','else','except','finally','for','from','global','if','import','in','is','lambda','nonlocal','not','or','pass','raise','return','try','while','with','yield']);
+    const decoder = new TextDecoder('utf-8', { fatal: false });
+    // Worker の進捗をメインスレッドへ通知する。画面上の「状態」欄に表示される。
+    function postStatus(message) { self.postMessage({ type: 'status', message }); }
+    // ファイル名の拡張子から言語名を推定する。多言語化する場合はここを拡張する。
+    function languageOf(name) { const lower = name.toLowerCase(); if (lower.endsWith('.java')) return 'java'; if (lower.endsWith('.py')) return 'python'; return 'unknown'; }
+    // ユーザがチェックボックスで選択した拡張子だけを解析対象にする。
+    function isTargetSource(name, allowedExtensions) { const lower = String(name).toLowerCase(); return allowedExtensions.some(ext => lower.endsWith(ext)); }
+    function u16(view, off) { return view.getUint16(off, true); }
+    function u32(view, off) { return view.getUint32(off, true); }
+    // zip 内の deflate 圧縮データを展開する。ブラウザ標準の DecompressionStream を使う。
+    async function inflateRaw(bytes) {
+      if (typeof DecompressionStream === 'undefined') throw new Error('このブラウザは zip の deflate 展開に必要な DecompressionStream に対応していません。');
+      const stream = new Blob([bytes]).stream().pipeThrough(new DecompressionStream('deflate-raw'));
+      return new Uint8Array(await new Response(stream).arrayBuffer());
+    }
+    // zip ファイルをブラウザ内で展開し、対象拡張子のソースファイルだけを取り出す。
+    // この最小実装では local file header を順に読む方式で、store と deflate を対象にしている。
+    async function extractZip(arrayBuffer, zipName, allowedExtensions) {
+      const view = new DataView(arrayBuffer), bytes = new Uint8Array(arrayBuffer), files = [];
+      let off = 0;
+      while (off + 30 <= bytes.length) {
+        const sig = u32(view, off);
+        if (sig !== 0x04034b50) break;
+        const flags = u16(view, off + 6), method = u16(view, off + 8);
+        const compressedSize = u32(view, off + 18), uncompressedSize = u32(view, off + 22);
+        const nameLen = u16(view, off + 26), extraLen = u16(view, off + 28);
+        const nameStart = off + 30;
+        const filename = decoder.decode(bytes.slice(nameStart, nameStart + nameLen));
+        const dataStart = nameStart + nameLen + extraLen;
+        if (flags & 0x08) throw new Error('data descriptor 形式の zip には、この最小実装では未対応です: ' + filename);
+        const compressed = bytes.slice(dataStart, dataStart + compressedSize);
+        if (!filename.endsWith('/') && isTargetSource(filename, allowedExtensions)) {
+          let contentBytes;
+          if (method === 0) contentBytes = compressed;
+          else if (method === 8) contentBytes = await inflateRaw(compressed);
+          else throw new Error('未対応の zip 圧縮方式です: method=' + method + ', file=' + filename);
+          files.push({ name: zipName + '/' + filename, size: uncompressedSize || contentBytes.length, lang: languageOf(filename), text: decoder.decode(contentBytes) });
+        }
+        off = dataStart + compressedSize;
+      }
+      return files;
+    }
+    // 通常ファイルと zip ファイルをまとめて読み込む。zip の場合は extractZip で中身を取り出す。
+    async function loadInputFiles(filePayloads, allowedExtensions) {
+      const loaded = [];
+      for (const item of filePayloads) {
+        if (/\.zip$/i.test(item.name)) { postStatus('zip 展開中: ' + item.name); loaded.push(...await extractZip(item.buffer, item.name, allowedExtensions)); }
+        else if (isTargetSource(item.name, allowedExtensions)) loaded.push({ name: item.name, size: item.buffer.byteLength, lang: languageOf(item.name), text: decoder.decode(new Uint8Array(item.buffer)) });
+      }
+      return loaded;
+    }
+    // Java 用の簡易コメント除去。文字列リテラル内の // や /* */ を誤って消さないよう状態を持って走査する。
+    function removeJavaComments(code) {
+      let out = '', i = 0, state = 'normal';
+      while (i < code.length) {
+        const c = code[i], n = code[i + 1];
+        if (state === 'normal') {
+          if (c === '/' && n === '/') { state = 'lineComment'; i += 2; continue; }
+          if (c === '/' && n === '*') { state = 'blockComment'; i += 2; continue; }
+          if (c === '"') { out += c; state = 'double'; i++; continue; }
+          if (c === "'") { out += c; state = 'single'; i++; continue; }
+          out += c; i++; continue;
+        }
+        if (state === 'lineComment') { if (c === '\n') { out += '\n'; state = 'normal'; } i++; continue; }
+        if (state === 'blockComment') { if (c === '*' && n === '/') { state = 'normal'; i += 2; continue; } if (c === '\n') out += '\n'; i++; continue; }
+        if (state === 'double') { out += c; if (c === '\\') { out += n || ''; i += 2; continue; } if (c === '"') state = 'normal'; i++; continue; }
+        if (state === 'single') { out += c; if (c === '\\') { out += n || ''; i += 2; continue; } if (c === "'") state = 'normal'; i++; continue; }
+      }
+      return out;
+    }
+    // Python 用の簡易コメント除去。# コメントと文字列を区別し、三重引用符文字列も簡易的に扱う。
+    function removePythonComments(code) {
+      let out = '', i = 0, state = 'normal', quote = '';
+      while (i < code.length) {
+        const c = code[i], tri = code.slice(i, i + 3);
+        if (state === 'normal') {
+          if (c === '#') { state = 'lineComment'; i++; continue; }
+          if (tri === String.fromCharCode(39,39,39) || tri === '"""') { out += tri; quote = tri; state = 'triple'; i += 3; continue; }
+          if (c === '"' || c === "'") { out += c; quote = c; state = 'string'; i++; continue; }
+          out += c; i++; continue;
+        }
+        if (state === 'lineComment') { if (c === '\n') { out += '\n'; state = 'normal'; } i++; continue; }
+        if (state === 'string') { out += c; if (c === '\\') { out += code[i + 1] || ''; i += 2; continue; } if (c === quote) state = 'normal'; i++; continue; }
+        if (state === 'triple') { if (code.slice(i, i + 3) === quote) { out += quote; i += 3; state = 'normal'; continue; } out += c; i++; continue; }
+      }
+      return out;
+    }
+    // ソースコードを比較しやすいトークン列へ変換する。
+    // 数値は NUM、文字列は STR、識別子正規化が ON の場合は多くの識別子を ID に置き換える。
+    function tokenize(code, lang, normalizeIds) {
+      const cleaned = lang === 'java' ? removeJavaComments(code) : removePythonComments(code);
+      const keywords = lang === 'java' ? JAVA_KEYWORDS : PY_KEYWORDS;
+      const tokenRe = /[A-Za-z_$][A-Za-z0-9_$]*|\d+(?:\.\d+)?|"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|==|!=|<=|>=|\+\+|--|&&|\|\||\+=|-=|\*=|\/=|%=|[-+*/%<>=!&|^~?:;.,(){}\[\]]/g;
+      const tokens = [];
+      let m;
+      while ((m = tokenRe.exec(cleaned)) !== null) {
+        const raw = m[0], pos = m.index;
+        const line = 1 + cleaned.slice(0, pos).split('\n').length - 1;
+        let value = raw;
+        if (/^\d/.test(raw)) value = 'NUM';
+        else if (/^["']/.test(raw)) value = 'STR';
+        else if (/^[A-Za-z_$]/.test(raw) && normalizeIds && !keywords.has(raw)) value = 'ID';
+        tokens.push({ value, line, index: tokens.length });
+      }
+      return tokens;
+    }
+    // k-gram を固定長の数値に変換するための簡易ハッシュ関数。FNV-1a に近い処理を使っている。
+    function hashString(s) { let h = 2166136261 >>> 0; for (let i = 0; i < s.length; i++) { h ^= s.charCodeAt(i); h = Math.imul(h, 16777619) >>> 0; } return h >>> 0; }
+    // トークン列から k-gram を作り、winnowing によって代表ハッシュ fingerprint を選ぶ。
+    // fingerprint は「この付近のコード片を表す目印」として後段の比較に使う。
+    function fingerprints(tokens, k, w) {
+      if (tokens.length < k) return [];
+      const hashes = [];
+      for (let i = 0; i <= tokens.length - k; i++) hashes.push({ hash: hashString(tokens.slice(i, i + k).map(t => t.value).join(' ')), start: i, end: i + k - 1 });
+      const fps = [];
+      let lastSelected = -1;
+      for (let i = 0; i <= hashes.length - w; i++) {
+        let minPos = i;
+        for (let j = i; j < i + w; j++) if (hashes[j].hash <= hashes[minPos].hash) minPos = j;
+        if (minPos !== lastSelected) { fps.push(hashes[minPos]); lastSelected = minPos; }
+      }
+      return fps;
+    }
+    // fingerprint 値から、その値が出現したファイルと位置を逆引きできる索引を作る。
+    function buildIndex(docs) {
+      const index = new Map();
+      docs.forEach((doc, docId) => doc.fps.forEach(fp => {
+        const arr = index.get(fp.hash) || [];
+        arr.push({ docId, start: fp.start, end: fp.end });
+        index.set(fp.hash, arr);
+      }));
+      return index;
+    }
+    // 同じ fingerprint を持つ位置をもとに、類似していそうなファイルペアと範囲を抽出する。
+    // 近い位置の一致をマージし、最小一致トークン数を満たすものだけを結果に残す。
+    function findMatches(docs, index, minTokens) {
+      const pairHits = new Map();
+      for (const occs of index.values()) {
+        if (occs.length < 2 || occs.length > 100) continue;
+        for (let i = 0; i < occs.length; i++) for (let j = i + 1; j < occs.length; j++) {
+          const a = occs[i], b = occs[j];
+          if (a.docId === b.docId) continue;
+          const x = Math.min(a.docId, b.docId), y = Math.max(a.docId, b.docId);
+          const left = a.docId === x ? a : b, right = a.docId === x ? b : a;
+          const key = x + ':' + y, arr = pairHits.get(key) || [];
+          arr.push({ aStart: left.start, aEnd: left.end, bStart: right.start, bEnd: right.end });
+          pairHits.set(key, arr);
+        }
+      }
+      const results = [];
+      for (const [key, hits] of pairHits.entries()) {
+        const [aId, bId] = key.split(':').map(Number);
+        hits.sort((p, q) => (p.aStart - q.aStart) || (p.bStart - q.bStart));
+        const merged = [];
+        for (const h of hits) {
+          const last = merged[merged.length - 1];
+          if (last && h.aStart <= last.aEnd + 10 && h.bStart <= last.bEnd + 10) { last.aEnd = Math.max(last.aEnd, h.aEnd); last.bEnd = Math.max(last.bEnd, h.bEnd); }
+          else merged.push({ ...h });
+        }
+        const filtered = merged.filter(m => Math.max(m.aEnd - m.aStart + 1, m.bEnd - m.bStart + 1) >= minTokens);
+        if (!filtered.length) continue;
+        const matchedTokens = filtered.reduce((sum, m) => sum + Math.max(m.aEnd - m.aStart + 1, m.bEnd - m.bStart + 1), 0);
+        const denom = Math.min(docs[aId].tokens.length, docs[bId].tokens.length) || 1;
+        results.push({ aId, bId, ranges: filtered, score: Math.min(100, Math.round((matchedTokens / denom) * 100)), matchedTokens });
+      }
+      return results.sort((r1, r2) => r2.score - r1.score || r2.matchedTokens - r1.matchedTokens);
+    }
+    // 重複率計算用に、同じファイル内で重なったクローン範囲をマージする。
+    function mergeRanges(ranges) {
+      if (!ranges.length) return [];
+      const sorted = ranges.map(r => ({ start: Math.max(0, r.start), end: Math.max(0, r.end) })).sort((a, b) => a.start - b.start || a.end - b.end);
+      const merged = [];
+      for (const r of sorted) {
+        const last = merged[merged.length - 1];
+        if (last && r.start <= last.end + 1) last.end = Math.max(last.end, r.end);
+        else merged.push({ ...r });
+      }
+      return merged;
+    }
+    function countRangeTokens(ranges) { return ranges.reduce((sum, r) => sum + Math.max(0, r.end - r.start + 1), 0); }
+    // 全体統計とファイル別統計を計算する。
+    // 重複率は、範囲をマージしてユニークなトークン数を数えることで過大評価を避ける。
+    function computeStatistics(docs, results) {
+      const totalFiles = docs.length;
+      const totalTokens = docs.reduce((sum, d) => sum + d.tokens.length, 0);
+      const totalFingerprints = docs.reduce((sum, d) => sum + d.fps.length, 0);
+      const clonePairCount = results.length;
+      const cloneRangeCount = results.reduce((sum, r) => sum + r.ranges.length, 0);
+      const maxSimilarity = results.length ? Math.max(...results.map(r => r.score)) : 0;
+      const avgSimilarity = results.length ? results.reduce((sum, r) => sum + r.score, 0) / results.length : 0;
+      const maxMatchedTokens = results.length ? Math.max(...results.map(r => r.matchedTokens)) : 0;
+      const perFileRanges = docs.map(() => []), perFilePairCounts = docs.map(() => 0), perFileRangeCounts = docs.map(() => 0);
+      const perFileBest = docs.map(() => ({ partnerId: null, score: 0, matchedTokens: 0 }));
+      for (const r of results) {
+        perFilePairCounts[r.aId]++; perFilePairCounts[r.bId]++;
+        perFileRangeCounts[r.aId] += r.ranges.length; perFileRangeCounts[r.bId] += r.ranges.length;
+        if (r.score > perFileBest[r.aId].score || (r.score === perFileBest[r.aId].score && r.matchedTokens > perFileBest[r.aId].matchedTokens)) perFileBest[r.aId] = { partnerId: r.bId, score: r.score, matchedTokens: r.matchedTokens };
+        if (r.score > perFileBest[r.bId].score || (r.score === perFileBest[r.bId].score && r.matchedTokens > perFileBest[r.bId].matchedTokens)) perFileBest[r.bId] = { partnerId: r.aId, score: r.score, matchedTokens: r.matchedTokens };
+        for (const m of r.ranges) { perFileRanges[r.aId].push({ start: m.aStart, end: m.aEnd }); perFileRanges[r.bId].push({ start: m.bStart, end: m.bEnd }); }
+      }
+      let totalCloneTokens = 0;
+      const fileStats = docs.map((d, i) => {
+        const cloneTokens = countRangeTokens(mergeRanges(perFileRanges[i]));
+        totalCloneTokens += cloneTokens;
+        return { name: d.name, lang: d.lang, size: d.size, tokenCount: d.tokens.length, fingerprintCount: d.fps.length, clonePairCount: perFilePairCounts[i], cloneRangeCount: perFileRangeCounts[i], cloneTokenCount: cloneTokens, duplicationRate: d.tokens.length ? cloneTokens / d.tokens.length : 0, bestPartnerName: perFileBest[i].partnerId === null ? '' : docs[perFileBest[i].partnerId].name, bestSimilarity: perFileBest[i].score, bestMatchedTokens: perFileBest[i].matchedTokens };
+      });
+      return { totalFiles, totalTokens, totalFingerprints, clonePairCount, cloneRangeCount, totalCloneTokens, duplicationRate: totalTokens ? totalCloneTokens / totalTokens : 0, maxSimilarity, avgSimilarity, maxMatchedTokens, fileStats };
+    }
+    // メインスレッドから検出開始メッセージを受け取り、読み込みから統計計算までを順に実行する。
+    self.onmessage = async (ev) => {
+      const { files, settings } = ev.data;
+      try {
+        postStatus('入力ファイルを読み込み中...');
+        const loaded = await loadInputFiles(files, settings.allowedExtensions || ['.java', '.py']);
+        if (loaded.length < 2) { self.postMessage({ type: 'done', docs: loaded, results: [], stats: null, message: 'Java または Python のファイルを2つ以上選択してください。' }); return; }
+        postStatus('トークン化・fingerprint生成中...');
+        const docs = loaded.map((d, i) => {
+          if (i % 20 === 0) postStatus('トークン化中: ' + (i + 1) + ' / ' + loaded.length);
+          const tokens = tokenize(d.text, d.lang, settings.normalizeIds);
+          const fps = fingerprints(tokens, settings.k, settings.w);
+          return { ...d, tokens, fps };
+        });
+        postStatus('インデックス作成中...');
+        const index = buildIndex(docs);
+        postStatus('候補抽出中...');
+        const results = findMatches(docs, index, settings.minTokens);
+        postStatus('統計情報を集計中...');
+        const stats = computeStatistics(docs, results);
+        self.postMessage({ type: 'done', docs, results, stats, message: '完了: ' + docs.length + ' ファイル、' + results.length + ' 件のファイルペア候補を検出しました。' });
+      } catch (e) {
+        self.postMessage({ type: 'error', message: e && e.message ? e.message : String(e) });
+      }
+    };
+  `;
+
+  // Worker コード文字列から Blob URL を作り、Web Worker を起動する。
+  function createWorker() {
+    const blob = new Blob([workerSource], { type: 'text/javascript' });
+    const url = URL.createObjectURL(blob);
+    const worker = new Worker(url);
+    worker._objectUrl = url;
+    return worker;
+  }
+  // ソースコードを HTML として安全に表示するため、特殊文字をエスケープする。
+  function escapeHtml(s) { return String(s).replace(/[&<>]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;' }[c])); }
+  function formatNumber(n) { return Number(n || 0).toLocaleString('ja-JP'); }
+  function formatPercent(x) { return (Number(x || 0) * 100).toFixed(1) + '%'; }
+  // 可視化時の差分比較用に、行内のコメントや連続空白をならす。
+  function normalizedLineForDiff(line) { return String(line).replace(/\/\/.*$/g, '').replace(/#.*$/g, '').replace(/\s+/g, ' ').trim(); }
+  // 2行がどの程度似ているかを、字句集合の Jaccard 類似度で大まかに測る。
+  function lineSimilarity(a, b) {
+    const x = normalizedLineForDiff(a), y = normalizedLineForDiff(b);
+    if (!x && !y) return 1;
+    if (!x || !y) return 0;
+    if (x === y) return 1;
+    const xTokens = x.match(/[A-Za-z_$][A-Za-z0-9_$]*|\d+(?:\.\d+)?|\S/g) || [];
+    const yTokens = y.match(/[A-Za-z_$][A-Za-z0-9_$]*|\d+(?:\.\d+)?|\S/g) || [];
+    const setX = new Set(xTokens), setY = new Set(yTokens);
+    let intersection = 0;
+    for (const t of setX) if (setY.has(t)) intersection++;
+    return intersection / (new Set([...setX, ...setY]).size || 1);
+  }
+  // クローン範囲内の左右の行を、LCS を使って対応付ける。
+  // 完全一致行を軸にしつつ、ある程度似た行は changed として字句単位比較へ回す。
+  function lcsLineAlignment(aLines, bLines) {
+    const m = aLines.length, n = bLines.length;
+    const aNorm = aLines.map(normalizedLineForDiff), bNorm = bLines.map(normalizedLineForDiff);
+    const dp = Array.from({ length: m + 1 }, () => new Uint16Array(n + 1));
+
+    for (let i = m - 1; i >= 0; i--) {
+      for (let j = n - 1; j >= 0; j--) {
+        const same = aNorm[i] && bNorm[j] && aNorm[i] === bNorm[j];
+        dp[i][j] = same ? dp[i + 1][j + 1] + 1 : Math.max(dp[i + 1][j], dp[i][j + 1]);
+      }
+    }
+
+    const aligned = [];
+    let i = 0, j = 0;
+    while (i < m && j < n) {
+      if (aNorm[i] && bNorm[j] && aNorm[i] === bNorm[j]) {
+        aligned.push({ a: i, b: j, kind: 'same' });
+        i++;
+        j++;
+      } else {
+        const sim = lineSimilarity(aLines[i] || '', bLines[j] || '');
+        if (sim >= 0.35) {
+          aligned.push({ a: i, b: j, kind: 'changed' });
+          i++;
+          j++;
+        } else if (dp[i + 1][j] >= dp[i][j + 1]) {
+          aligned.push({ a: i++, b: null, kind: 'aOnly' });
+        } else {
+          aligned.push({ a: null, b: j++, kind: 'bOnly' });
+        }
+      }
+    }
+    while (i < m) aligned.push({ a: i++, b: null, kind: 'aOnly' });
+    while (j < n) aligned.push({ a: null, b: j++, kind: 'bOnly' });
+    return aligned;
+  }
+
+  // 表示用の1行を字句単位に分割する。空白も表示位置維持のため token として保持する。
+  function tokenizeLineForDiff(line) {
+    const tokens = [];
+    const re = /[A-Za-z_$][A-Za-z0-9_$]*|\d+(?:\.\d+)?|"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|\s+|./g;
+    let m;
+    while ((m = re.exec(String(line))) !== null) {
+      tokens.push({
+        text: m[0],
+        normalized: /\s+/.test(m[0]) ? '' : m[0],
+        isSpace: /^\s+$/.test(m[0])
+      });
+    }
+    return tokens;
+  }
+
+  // 対応する相手行がない場合、その行の非空白字句をすべて差分として扱う。
+  function diffAllNonSpaceTokenIndices(line) {
+    const tokens = tokenizeLineForDiff(line);
+    const diff = new Set();
+    tokens.forEach((t, idx) => {
+      if (!t.isSpace && t.normalized) diff.add(idx);
+    });
+    return diff;
+  }
+
+  // 対応する2行について、行内トークン列の LCS を取り、対応しない字句を差分として返す。
+  function diffTokenIndices(aTokens, bTokens, maxTokens = 200) {
+    const aSig = aTokens.map((t, i) => ({ value: t.normalized, index: i })).filter(x => x.value);
+    const bSig = bTokens.map((t, i) => ({ value: t.normalized, index: i })).filter(x => x.value);
+    const aDiff = new Set(aSig.map(x => x.index));
+    const bDiff = new Set(bSig.map(x => x.index));
+
+    if (aSig.length > maxTokens || bSig.length > maxTokens) {
+      return { aDiff, bDiff, mode: 'fallback' };
+    }
+
+    const m = aSig.length, n = bSig.length;
+    const dp = Array.from({ length: m + 1 }, () => new Uint16Array(n + 1));
+    for (let i = m - 1; i >= 0; i--) {
+      for (let j = n - 1; j >= 0; j--) {
+        dp[i][j] = aSig[i].value === bSig[j].value ? dp[i + 1][j + 1] + 1 : Math.max(dp[i + 1][j], dp[i][j + 1]);
+      }
+    }
+
+    let i = 0, j = 0;
+    while (i < m && j < n) {
+      if (aSig[i].value === bSig[j].value) {
+        aDiff.delete(aSig[i].index);
+        bDiff.delete(bSig[j].index);
+        i++;
+        j++;
+      } else if (dp[i + 1][j] >= dp[i][j + 1]) {
+        i++;
+      } else {
+        j++;
+      }
+    }
+    return { aDiff, bDiff, mode: 'token-lcs' };
+  }
+
+  // 1行分のコードを HTML に変換する。クローン行背景と差分字句ハイライトをここで付与する。
+  function renderCodeLine(line, lineNo, cls, tokenDiffSet = null) {
+    const prefix = `<span class="line-number">${String(lineNo).padStart(4, ' ')}  </span>`;
+    if (!tokenDiffSet) {
+      const body = line ? escapeHtml(line) : '&nbsp;';
+      return `<span class="code-line ${cls}">${prefix}${body}</span>`;
+    }
+
+    const tokens = tokenizeLineForDiff(line);
+    const body = tokens.map((t, idx) => {
+      const escaped = escapeHtml(t.text);
+      if (t.isSpace || !tokenDiffSet.has(idx)) return escaped;
+      return `<span class="token-diff">${escaped}</span>`;
+    }).join('') || '&nbsp;';
+    return `<span class="code-line ${cls}">${prefix}${body}</span>`;
+  }
+
+  // 左右のクローン範囲について、どの行のどの字句を差分表示するかを決める。
+  // 長すぎる範囲では計算量を抑えるため、簡易比較に切り替える。
+  function buildDiffPlan(aCore, bCore, aStartLine, bStartLine, maxLcsLines = 200) {
+    const plan = {
+      aTokenDiffs: new Map(),
+      bTokenDiffs: new Map(),
+      mode: 'token-lcs'
+    };
+
+    function markWholeLineAsTokenDiff(side, lineNo, lineText) {
+      const diff = diffAllNonSpaceTokenIndices(lineText);
+      if (!diff.size) return;
+      if (side === 'a') plan.aTokenDiffs.set(lineNo, diff);
+      else plan.bTokenDiffs.set(lineNo, diff);
+    }
+
+    if (aCore.length > maxLcsLines || bCore.length > maxLcsLines) {
+      const maxCore = Math.max(aCore.length, bCore.length);
+      for (let i = 0; i < maxCore; i++) {
+        const aLine = aCore[i] || '';
+        const bLine = bCore[i] || '';
+        const sim = lineSimilarity(aLine, bLine);
+        if (sim < 0.75) {
+          if (i < aCore.length && i < bCore.length) {
+            const diff = diffTokenIndices(tokenizeLineForDiff(aLine), tokenizeLineForDiff(bLine), 200);
+            if (diff.aDiff.size > 0) plan.aTokenDiffs.set(aStartLine + i, diff.aDiff);
+            if (diff.bDiff.size > 0) plan.bTokenDiffs.set(bStartLine + i, diff.bDiff);
+          } else {
+            if (i < aCore.length) markWholeLineAsTokenDiff('a', aStartLine + i, aLine);
+            if (i < bCore.length) markWholeLineAsTokenDiff('b', bStartLine + i, bLine);
+          }
+        }
+      }
+      plan.mode = 'token-simple';
+      return plan;
+    }
+
+    const alignment = lcsLineAlignment(aCore, bCore);
+    for (const item of alignment) {
+      if (item.kind === 'same') continue;
+
+      if (item.kind === 'changed' && item.a !== null && item.b !== null) {
+        const aLineNo = aStartLine + item.a;
+        const bLineNo = bStartLine + item.b;
+        const diff = diffTokenIndices(
+          tokenizeLineForDiff(aCore[item.a] || ''),
+          tokenizeLineForDiff(bCore[item.b] || ''),
+          200
+        );
+        if (diff.aDiff.size > 0) plan.aTokenDiffs.set(aLineNo, diff.aDiff);
+        if (diff.bDiff.size > 0) plan.bTokenDiffs.set(bLineNo, diff.bDiff);
+      } else {
+        if (item.a !== null) markWholeLineAsTokenDiff('a', aStartLine + item.a, aCore[item.a] || '');
+        if (item.b !== null) markWholeLineAsTokenDiff('b', bStartLine + item.b, bCore[item.b] || '');
+      }
+    }
+
+    return plan;
+  }
+
+  // 検出されたトークン範囲を行番号へ変換し、左右のコード断片を side-by-side 表示用 HTML にする。
+  function snippetPairByTokenRange(docA, rangeA, docB, rangeB) {
+    const aTokens = docA.tokens;
+    const bTokens = docB.tokens;
+    const aStartLine = Math.max(1, aTokens[rangeA.start]?.line || 1);
+    const aEndLine = Math.max(aStartLine, aTokens[Math.min(rangeA.end, aTokens.length - 1)]?.line || aStartLine);
+    const bStartLine = Math.max(1, bTokens[rangeB.start]?.line || 1);
+    const bEndLine = Math.max(bStartLine, bTokens[Math.min(rangeB.end, bTokens.length - 1)]?.line || bStartLine);
+
+    const aLines = docA.text.split(/\r?\n/);
+    const bLines = docB.text.split(/\r?\n/);
+    const aFrom = Math.max(1, aStartLine - 2);
+    const aTo = Math.min(aLines.length, aEndLine + 2);
+    const bFrom = Math.max(1, bStartLine - 2);
+    const bTo = Math.min(bLines.length, bEndLine + 2);
+
+    const aCore = aLines.slice(aStartLine - 1, aEndLine);
+    const bCore = bLines.slice(bStartLine - 1, bEndLine);
+    const diffPlan = buildDiffPlan(aCore, bCore, aStartLine, bStartLine, 200);
+
+    function render(lines, from, to, cloneStart, cloneEnd, tokenDiffs) {
+      const rendered = [];
+      for (let lineNo = from; lineNo <= to; lineNo++) {
+        const raw = lines[lineNo - 1] || '';
+        const inClone = lineNo >= cloneStart && lineNo <= cloneEnd;
+        const tokenDiffSet = tokenDiffs.get(lineNo) || null;
+        const cls = inClone ? 'line-clone' : '';
+        rendered.push(renderCodeLine(raw, lineNo, cls, tokenDiffSet));
+      }
+      return rendered.join('');
+    }
+
+    return {
+      aHtml: render(aLines, aFrom, aTo, aStartLine, aEndLine, diffPlan.aTokenDiffs),
+      bHtml: render(bLines, bFrom, bTo, bStartLine, bEndLine, diffPlan.bTokenDiffs),
+      diffMode: diffPlan.mode,
+      aStartLine,
+      aEndLine,
+      bStartLine,
+      bEndLine
+    };
+  }
+
+  // 全体統計を表として描画する。
+  function renderSummaryStats(stats) {
+    if (!stats) { summaryStatsEl.innerHTML = '<p class="small">まだ統計情報はありません。</p>'; return; }
+    summaryStatsEl.innerHTML = `<table><tbody>
+      <tr><th>解析対象ファイル数</th><td>${formatNumber(stats.totalFiles)}</td><th>総トークン数</th><td>${formatNumber(stats.totalTokens)}</td></tr>
+      <tr><th>総 fingerprint 数</th><td>${formatNumber(stats.totalFingerprints)}</td><th>クローン候補ペア数</th><td>${formatNumber(stats.clonePairCount)}</td></tr>
+      <tr><th>総クローン範囲数</th><td>${formatNumber(stats.cloneRangeCount)}</td><th>クローン範囲内トークン数</th><td>${formatNumber(stats.totalCloneTokens)}</td></tr>
+      <tr><th>全体重複率</th><td>${formatPercent(stats.duplicationRate)}</td><th>最大類似度</th><td>${formatNumber(stats.maxSimilarity)}%</td></tr>
+      <tr><th>平均類似度</th><td>${Number(stats.avgSimilarity || 0).toFixed(1)}%</td><th>最大一致トークン概数</th><td>${formatNumber(stats.maxMatchedTokens)}</td></tr>
+    </tbody></table><p class="small">重複率は、ファイルごとにクローン範囲をマージし、同じトークン範囲を重複カウントしない形で計算しています。</p>`;
+  }
+  // ファイル一覧とファイル別統計を表として描画する。
+  function renderFileList(docs, stats) {
+    if (!docs.length) { fileListEl.innerHTML = '<p class="small">対象ファイルがありません。</p>'; return; }
+    const fileStats = stats && stats.fileStats ? stats.fileStats : docs.map(d => ({ name: d.name, lang: d.lang, size: d.size, tokenCount: d.tokens ? d.tokens.length : 0, fingerprintCount: d.fps ? d.fps.length : 0, clonePairCount: 0, cloneRangeCount: 0, cloneTokenCount: 0, duplicationRate: 0, bestPartnerName: '', bestSimilarity: 0 }));
+    fileListEl.innerHTML = `<table><thead><tr>
+      <th>ファイル</th><th>言語</th><th>サイズ</th><th>トークン数</th><th>fingerprint数</th>
+      <th>関連ペア数</th><th>範囲数</th><th>クローントークン数</th><th>重複率</th><th>最も類似した相手</th><th>最大類似度</th>
+    </tr></thead><tbody>` + fileStats.map(d => `<tr>
+      <td>${escapeHtml(d.name)}</td><td>${escapeHtml(d.lang)}</td><td>${formatNumber(d.size)}</td>
+      <td>${formatNumber(d.tokenCount)}</td><td>${formatNumber(d.fingerprintCount)}</td><td>${formatNumber(d.clonePairCount)}</td>
+      <td>${formatNumber(d.cloneRangeCount)}</td><td>${formatNumber(d.cloneTokenCount)}</td><td>${formatPercent(d.duplicationRate)}</td>
+      <td>${d.bestPartnerName ? escapeHtml(d.bestPartnerName) : '-'}</td><td>${formatNumber(d.bestSimilarity)}%</td>
+    </tr>`).join('') + '</tbody></table>';
+  }
+  // クローン候補一覧を描画する。各候補について最大3範囲までコード断片を表示する。
+  function renderResults(docs, results) {
+    if (!results.length) { resultsEl.innerHTML = '<p>条件を満たすクローン候補はありません。</p>'; return; }
+    resultsEl.innerHTML = results.slice(0, 50).map((r, idx) => {
+      const a = docs[r.aId], b = docs[r.bId];
+      const ranges = r.ranges.slice(0, 3).map((m, i) => {
+        const pair = snippetPairByTokenRange(a, { start: m.aStart, end: m.aEnd }, b, { start: m.bStart, end: m.bEnd });
+        return `<div class="match">
+          <div class="match-header">範囲 ${i + 1}: ${escapeHtml(a.name)}:${pair.aStartLine}-${pair.aEndLine} / ${escapeHtml(b.name)}:${pair.bStartLine}-${pair.bEndLine}<br><span class="small">差分ハイライト: ${pair.diffMode === 'token-lcs' ? '字句単位LCS' : '字句単位簡易比較（長い範囲のため）'}</span></div>
+          <div class="diff"><pre>${pair.aHtml}</pre><pre>${pair.bHtml}</pre></div>
+        </div>`;
+      }).join('');
+      return `<div class="match"><div class="match-header">#${idx + 1} 類似度 ${r.score}% / 一致トークン概数 ${r.matchedTokens}<br>${escapeHtml(a.name)} ↔ ${escapeHtml(b.name)}</div>${ranges}</div>`;
+    }).join('');
+  }
+  // 対象言語チェックボックスの状態を読み取り、選択された拡張子を返す。
+  function getSelectedLanguageOptions() {
+    return Array.from(document.querySelectorAll('.lang-filter:checked')).map(el => ({
+      extension: el.value.toLowerCase(),
+      lang: el.dataset.lang
+    }));
+  }
+
+  function isSelectedSourceFile(name, allowedExtensions) {
+    const lower = String(name).toLowerCase();
+    return allowedExtensions.some(ext => lower.endsWith(ext));
+  }
+
+  // 通常ファイル入力とフォルダ入力から、解析対象ファイルだけを集める。
+  // フォルダ入力では webkitRelativePath を使って相対パスを保持する。
+  async function collectInputFiles(fileList, folderFileList, allowedExtensions) {
+    const files = [];
+    const seen = new Set();
+
+    async function addFile(file, displayName) {
+      const key = displayName + ':' + file.size + ':' + file.lastModified;
+      if (seen.has(key)) return;
+      seen.add(key);
+      files.push({ name: displayName, buffer: await file.arrayBuffer() });
+    }
+
+    for (const file of Array.from(fileList || [])) {
+      if (/\.zip$/i.test(file.name) || isSelectedSourceFile(file.name, allowedExtensions)) {
+        await addFile(file, file.name);
+      }
+    }
+
+    for (const file of Array.from(folderFileList || [])) {
+      const relativeName = file.webkitRelativePath || file.name;
+      if (isSelectedSourceFile(relativeName, allowedExtensions)) {
+        await addFile(file, relativeName);
+      }
+    }
+
+    return files;
+  }
+
+
+
+  // ファイル選択時に、選択されたファイル数を画面に表示する。
+  fileInput.addEventListener('change', () => {
+    const files = Array.from(fileInput.files || []);
+    if (!files.length) {
+      fileSummary.textContent = 'ファイルは未選択です。';
+      return;
+    }
+    fileSummary.textContent = `${files.length.toLocaleString('ja-JP')} ファイルを選択中`;
+  });
+
+  // フォルダ選択時に、選択されたトップフォルダ名と配下ファイル数を画面に表示する。
+  folderInput.addEventListener('change', () => {
+    const files = Array.from(folderInput.files || []);
+    if (!files.length) {
+      folderSummary.textContent = 'フォルダは未選択です。';
+      return;
+    }
+    const firstPath = files[0].webkitRelativePath || files[0].name;
+    const folderName = firstPath.includes('/') ? firstPath.split('/')[0] : '選択済みフォルダ';
+    folderSummary.textContent = `${folderName} を選択中（${files.length.toLocaleString('ja-JP')} ファイル）`;
+  });
+
+  // 「検出する」ボタン押下時のメイン処理。入力収集後、Worker に解析を依頼する。
+  runButton.addEventListener('click', async () => {
+    resultsEl.innerHTML = ''; fileListEl.innerHTML = ''; summaryStatsEl.innerHTML = '';
+    statusEl.textContent = '入力準備中...'; runButton.disabled = true;
+    let worker = null;
+    try {
+      const selectedLanguages = getSelectedLanguageOptions();
+      const allowedExtensions = selectedLanguages.map(x => x.extension);
+      if (!allowedExtensions.length) {
+        statusEl.textContent = '対象言語を1つ以上選択してください。';
+        runButton.disabled = false;
+        return;
+      }
+
+      const settings = {
+        k: Number(document.getElementById('kSize').value),
+        w: Number(document.getElementById('windowSize').value),
+        minTokens: Number(document.getElementById('minTokens').value),
+        normalizeIds: document.getElementById('normalizeIds').value === 'on',
+        allowedExtensions
+      };
+      const files = await collectInputFiles(fileInput.files, folderInput.files, allowedExtensions);
+      if (!files.length) { statusEl.textContent = '選択された対象言語のソースファイル、zip、またはフォルダを指定してください。'; runButton.disabled = false; return; }
+      worker = createWorker();
+      worker.onmessage = (ev) => {
+        const msg = ev.data;
+        if (msg.type === 'status') statusEl.textContent = msg.message;
+        else if (msg.type === 'done') {
+          statusEl.textContent = msg.message;
+          renderSummaryStats(msg.stats);
+          renderFileList(msg.docs || [], msg.stats);
+          renderResults(msg.docs || [], msg.results || []);
+          runButton.disabled = false;
+          worker.terminate(); URL.revokeObjectURL(worker._objectUrl);
+        } else if (msg.type === 'error') {
+          statusEl.innerHTML = '<span class="warning">エラー: ' + escapeHtml(msg.message) + '</span>';
+          runButton.disabled = false;
+          worker.terminate(); URL.revokeObjectURL(worker._objectUrl);
+        }
+      };
+      worker.onerror = (e) => {
+        statusEl.innerHTML = '<span class="warning">Worker エラー: ' + escapeHtml(e.message || String(e)) + '</span>';
+        runButton.disabled = false;
+        worker.terminate(); URL.revokeObjectURL(worker._objectUrl);
+      };
+      // ArrayBuffer を transfer して Worker に渡す。コピーではなく所有権移動なので、大きなファイルでも比較的効率がよい。
+      worker.postMessage({ files, settings }, files.map(f => f.buffer));
+    } catch (e) {
+      statusEl.innerHTML = '<span class="warning">エラー: ' + escapeHtml(e && e.message ? e.message : String(e)) + '</span>';
+      runButton.disabled = false;
+      if (worker) { worker.terminate(); URL.revokeObjectURL(worker._objectUrl); }
+    }
+  });
+})();
+</script>
+</body>
+</html>
