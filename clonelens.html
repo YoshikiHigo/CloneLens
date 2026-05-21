@@ -51,8 +51,12 @@
       pointer-events: none;
     }
     .secondary-button {
-      display: inline-block;
-      padding: 10px 14px;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      min-height: 40px;
+      box-sizing: border-box;
+      padding: 0 14px;
       border: none;
       border-radius: 8px;
       background: #475569;
@@ -65,6 +69,50 @@
       margin-top: 8px;
       color: #64748b;
       font-size: 12px;
+    }
+    .input-controls {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(240px, 320px));
+      gap: 20px 28px;
+      align-items: start;
+    }
+    .input-picker {
+      min-width: 0;
+    }
+    .input-picker > label:first-child {
+      min-height: 20px;
+      margin-bottom: 8px;
+      line-height: 1.5;
+    }
+    .input-warning {
+      margin: 8px 0 0;
+      line-height: 1.6;
+    }
+    .section-subtitle {
+      font-size: 15px;
+      margin: 20px 0 8px;
+    }
+    .language-controls {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 10px 28px;
+      align-items: center;
+      margin-bottom: 12px;
+    }
+    .language-controls label {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      margin: 0;
+      line-height: 1.4;
+    }
+    .language-controls input {
+      margin: 0;
+    }
+    @media (max-width: 640px) {
+      .input-controls {
+        grid-template-columns: 1fr;
+      }
     }
   </style>
 </head>
@@ -82,23 +130,23 @@
   -->
   <section class="panel">
     <h2>1. 入力選択</h2>
-    <div class="controls">
-      <div>
+    <div class="input-controls">
+      <div class="input-picker">
         <label>ソースファイルまたは zip ファイル</label>
         <input id="fileInput" class="hidden-file-input" type="file" multiple accept=".java,.py,.txt,.zip" />
         <label for="fileInput" class="secondary-button">ファイルを選択</label>
         <div id="fileSummary" class="selection-summary">ファイルは未選択です。</div>
       </div>
-      <div>
+      <div class="input-picker">
         <label>フォルダ</label>
         <input id="folderInput" class="hidden-file-input" type="file" webkitdirectory directory multiple />
         <label for="folderInput" class="secondary-button">フォルダを選択</label>
         <div id="folderSummary" class="selection-summary">フォルダは未選択です。</div>
-        <p class="small warning">ダイアログ内に「アップロード」と表示される場合がありますが、実際にはサーバ送信は行いません。</p>
+        <p class="small warning input-warning">ダイアログ内に「アップロード」と表示される場合がありますが、実際にはサーバ送信は行いません。</p>
       </div>
     </div>
-    <h3 style="font-size: 15px; margin-bottom: 8px;">対象言語</h3>
-    <div id="languageFilters" class="controls">
+    <h3 class="section-subtitle">対象言語</h3>
+    <div id="languageFilters" class="language-controls">
       <label><input type="checkbox" class="lang-filter" value=".java" data-lang="java" checked /> Java (.java)</label>
       <label><input type="checkbox" class="lang-filter" value=".py" data-lang="python" checked /> Python (.py)</label>
     </div>
